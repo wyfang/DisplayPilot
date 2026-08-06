@@ -1,0 +1,11 @@
+.DS_Store
+.module-cache/
+.build/
+dist/
+*.app
+
+# Local one-off display diagnostics; not part of the application.
+DisplayProbe
+DisplayProbe.swift
+ReconnectDisplay
+ReconnectDisplay.swift

@@ -1,0 +1,21 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Type-check
+        run: xcrun swiftc -typecheck -framework AppKit -framework CoreGraphics DisplayPilot.swift
+
+      - name: Build app
+        run: ./build.sh
+
+      - name: Verify signature
+        run: codesign --verify --deep --strict "dist/Display Pilot.app"
