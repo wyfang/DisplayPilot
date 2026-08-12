@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import ServiceManagement
 
 @_silgen_name("CGSConfigureDisplayEnabled")
 private func CGSConfigureDisplayEnabled(
@@ -42,12 +43,14 @@ private struct DisplayModeInfo: Codable, Equatable, Hashable {
     }
 
     func describesSameMode(as other: DisplayModeInfo) -> Bool {
-        modeID == other.modeID
-            || (width == other.width
-                && height == other.height
-                && pixelWidth == other.pixelWidth
-                && pixelHeight == other.pixelHeight
-                && abs(refreshRate - other.refreshRate) < 0.02)
+        let refreshMatches = refreshRate == 0
+            || other.refreshRate == 0
+            || abs(refreshRate - other.refreshRate) < 0.02
+        return width == other.width
+            && height == other.height
+            && pixelWidth == other.pixelWidth
+            && pixelHeight == other.pixelHeight
+            && refreshMatches
     }
 }
 
@@ -183,11 +186,15 @@ private final class DisplayController {
             return .failure(AppFailure(message: "显示器尚未连接，无法设置分辨率。"))
         }
 
-        let modes = rawDisplayModes(displayID)
-        guard let mode = modes.first(where: { DisplayModeInfo($0).describesSameMode(as: requested) })
-                ?? modes.first(where: {
-                    let candidate = DisplayModeInfo($0)
-                    return candidate.width == requested.width && candidate.height == requested.height
+        let modes = rawDisplayModes(displayID).filter { $0.isUsableForDesktopGUI() }
+        let logicalMatches = modes.filter {
+            let candidate = DisplayModeInfo($0)
+            return candidate.width == requested.width && candidate.height == requested.height
+        }
+        guard let mode = logicalMatches.first(where: { DisplayModeInfo($0).describesSameMode(as: requested) })
+                ?? logicalMatches.min(by: {
+                    modeDistance(DisplayModeInfo($0), from: requested)
+                        < modeDistance(DisplayModeInfo($1), from: requested)
                 }) else {
             return .failure(AppFailure(message: "找不到已保存的分辨率 \(requested.label)。"))
         }
@@ -214,6 +221,18 @@ private final class DisplayController {
             return .failure(AppFailure(message: "分辨率配置未能保存（错误 \(complete.rawValue)）。"))
         }
         return .success(())
+    }
+
+    private func modeDistance(_ candidate: DisplayModeInfo, from requested: DisplayModeInfo) -> Double {
+        let pixelDifference = abs(candidate.pixelWidth - requested.pixelWidth)
+            + abs(candidate.pixelHeight - requested.pixelHeight)
+        let refreshDifference: Double
+        if candidate.refreshRate == 0 || requested.refreshRate == 0 {
+            refreshDifference = 0
+        } else {
+            refreshDifference = abs(candidate.refreshRate - requested.refreshRate)
+        }
+        return Double(pixelDifference) * 1_000 + refreshDifference
     }
 
     private func displayModes(_ id: CGDirectDisplayID) -> [DisplayModeInfo] {
@@ -523,10 +542,11 @@ private final class DisplayPresetRowView: NSBox {
     }
 }
 
-private final class PresetWindowController: NSWindowController {
+private final class PresetWindowController: NSWindowController, NSTextFieldDelegate {
     private let store: PresetStore
     private let displayProvider: () -> [DisplayInfo]
     private let segmented = NSSegmentedControl(labels: ["预设 A", "预设 B"], trackingMode: .selectOne, target: nil, action: nil)
+    private let nameField = NSTextField(string: "")
     private let listStack = NSStackView()
     private var displays: [DisplayInfo] = []
     private var draft = PresetCollection(
@@ -557,6 +577,7 @@ private final class PresetWindowController: NSWindowController {
         displays = displayProvider()
         draft = store.load(displays: displays)
         if segmented.selectedSegment < 0 { segmented.selectedSegment = 0 }
+        updateSegmentLabels()
         rebuildRows()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -569,6 +590,14 @@ private final class PresetWindowController: NSWindowController {
         segmented.selectedSegment = 0
         segmented.target = self
         segmented.action = #selector(segmentChanged)
+
+        let nameLabel = NSTextField(labelWithString: "名称")
+        nameField.placeholderString = "输入预设名称"
+        nameField.delegate = self
+        let header = NSStackView(views: [segmented, nameLabel, nameField])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 10
 
         let description = NSTextField(wrappingLabelWithString: "为每块显示器分别保存开关状态、亮度、对比度调整和分辨率。菜单栏中可用 ⌘1 / ⌘2 一键切换。")
         description.textColor = .secondaryLabelColor
@@ -601,18 +630,20 @@ private final class PresetWindowController: NSWindowController {
         buttons.orientation = .horizontal
         buttons.spacing = 8
 
-        for view in [segmented, description, scroll, buttons] {
+        for view in [header, description, scroll, buttons] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
         NSLayoutConstraint.activate([
-            segmented.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
-            segmented.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+            header.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
+            header.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
+            header.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             segmented.widthAnchor.constraint(equalToConstant: 250),
+            nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
 
             description.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
             description.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
-            description.topAnchor.constraint(equalTo: segmented.bottomAnchor, constant: 14),
+            description.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
 
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
@@ -634,6 +665,7 @@ private final class PresetWindowController: NSWindowController {
         }
 
         let preset = selectedPreset
+        nameField.stringValue = preset.name
         if displays.isEmpty {
             let empty = NSTextField(wrappingLabelWithString: "未检测到显示器。连接显示器后重新打开此窗口。")
             empty.textColor = .secondaryLabelColor
@@ -669,7 +701,27 @@ private final class PresetWindowController: NSWindowController {
 
     @objc private func segmentChanged() { rebuildRows() }
 
+    func controlTextDidChange(_ notification: Notification) {
+        if segmented.selectedSegment == 1 {
+            draft.presetB.name = nameField.stringValue
+        } else {
+            draft.presetA.name = nameField.stringValue
+        }
+        updateSegmentLabels()
+    }
+
+    private func updateSegmentLabels() {
+        let nameA = draft.presetA.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nameB = draft.presetB.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        segmented.setLabel(nameA.isEmpty ? "预设 A" : nameA, forSegment: 0)
+        segmented.setLabel(nameB.isEmpty ? "预设 B" : nameB, forSegment: 1)
+    }
+
     @objc private func savePressed() {
+        draft.presetA.name = draft.presetA.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.presetB.name = draft.presetB.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if draft.presetA.name.isEmpty { draft.presetA.name = "预设 A" }
+        if draft.presetB.name.isEmpty { draft.presetB.name = "预设 B" }
         guard draft.presetA.displays.contains(where: \.enabled),
               draft.presetB.displays.contains(where: \.enabled) else {
             let alert = NSAlert()
@@ -687,6 +739,20 @@ private final class PresetWindowController: NSWindowController {
     }
 
     @objc private func cancelPressed() { window?.close() }
+}
+
+private final class PresetApplicationContext {
+    let preset: DisplayPreset
+    let slot: String
+    var errors: [String] = []
+    var enableFailures: [String: String] = [:]
+    var modeFailures: [String: String] = [:]
+    var disableFailures: [String: String] = [:]
+
+    init(preset: DisplayPreset, slot: String) {
+        self.preset = preset
+        self.slot = slot
+    }
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -752,14 +818,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(actionItem("刷新显示器", #selector(refresh), key: "r"))
         menu.addItem(actionItem("打开 BetterDisplay", #selector(openBetterDisplay)))
+        menu.addItem(launchAtLoginMenuItem())
         menu.addItem(.separator())
         menu.addItem(actionItem("退出 Display Pilot", #selector(quit), key: "q"))
         statusItem.menu = menu
     }
 
     private func presetMenuTitle(_ preset: DisplayPreset) -> String {
-        let enabled = preset.displays.filter(\.enabled).count
-        return "应用\(preset.name) · \(enabled) 块开启"
+        preset.name
     }
 
     private func actionItem(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
@@ -795,77 +861,224 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         applyingPreset = true
         rebuildMenu()
-        var errors: [String] = []
-        var requestedConnection = false
+        let context = PresetApplicationContext(preset: preset, slot: slot)
+        requestTargetConnections(context)
+        waitForTargetDisplays(context, attempt: 0, stableSignature: nil, stableCount: 0)
+    }
 
-        for entry in preset.displays where entry.enabled {
+    private func requestTargetConnections(_ context: PresetApplicationContext) {
+        for entry in context.preset.displays where entry.enabled {
+            let displays = displayController.displays()
             guard let display = displays.first(where: { $0.identity == entry.identity }) else {
-                errors.append("\(entry.name)：没有找到这块显示器")
+                context.enableFailures[entry.identity] = "没有找到这块显示器"
                 continue
             }
-            if !display.active {
-                requestedConnection = true
-                if case .failure(let error) = displayController.setEnabled(true, displayID: display.id) {
-                    errors.append("\(entry.name)：\(error.message)")
-                }
+            guard !display.active else { continue }
+            if case .failure(let error) = displayController.setEnabled(true, displayID: display.id) {
+                context.enableFailures[entry.identity] = error.message
             }
-        }
-
-        let delay = requestedConnection ? 1.2 : 0.05
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.finishApplying(preset: preset, slot: slot, previousErrors: errors)
         }
     }
 
-    private func finishApplying(preset: DisplayPreset, slot: String, previousErrors: [String]) {
-        var errors = previousErrors
-        var displays = displayController.displays()
-        let entries = Dictionary(uniqueKeysWithValues: preset.displays.map { ($0.identity, $0) })
-        let activeTargets = displays.filter { display in
-            display.active && entries[display.identity]?.enabled == true
+    private func waitForTargetDisplays(
+        _ context: PresetApplicationContext,
+        attempt: Int,
+        stableSignature: String?,
+        stableCount: Int
+    ) {
+        let displays = displayController.displays()
+        let targets = context.preset.displays.filter(\.enabled)
+        let resolved = targets.compactMap { entry in
+            displays.first(where: { $0.identity == entry.identity && $0.active })
         }
+        let allReady = resolved.count == targets.count && resolved.allSatisfy { !$0.availableModes.isEmpty }
+        let signature = resolved
+            .sorted { $0.identity < $1.identity }
+            .map { "\($0.identity):\($0.id):\($0.currentMode?.modeID ?? -1)" }
+            .joined(separator: "|")
+        let nextStableCount = allReady && signature == stableSignature ? stableCount + 1 : (allReady ? 1 : 0)
 
-        guard !activeTargets.isEmpty else {
-            errors.append("没有任何预设中要开启的显示器成功连接；为避免黑屏，未关闭当前屏幕")
-            completePresetApplication(slot: slot, errors: errors)
+        if allReady && nextStableCount >= 2 {
+            applyModePass(context, attempt: 1)
             return
         }
 
-        for display in activeTargets {
-            guard let entry = entries[display.identity] else { continue }
-            if let mode = entry.mode,
-               case .failure(let error) = displayController.setMode(mode, displayID: display.id) {
-                errors.append("\(entry.name)：\(error.message)")
+        if attempt < 12 {
+            if attempt > 0 && attempt.isMultiple(of: 2) {
+                requestTargetConnections(context)
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+                self?.waitForTargetDisplays(
+                    context,
+                    attempt: attempt + 1,
+                    stableSignature: allReady ? signature : nil,
+                    stableCount: nextStableCount
+                )
+            }
+            return
+        }
+
+        for entry in targets where !resolved.contains(where: { $0.identity == entry.identity }) {
+            let reason = context.enableFailures[entry.identity] ?? "等待显示器响应超时"
+            context.errors.append("\(entry.name)：\(reason)")
+        }
+        guard !resolved.isEmpty else {
+            context.errors.append("没有任何预设中要开启的显示器成功连接；为避免黑屏，未关闭当前屏幕")
+            completePresetApplication(context)
+            return
+        }
+        applyModePass(context, attempt: 1)
+    }
+
+    private func applyModePass(_ context: PresetApplicationContext, attempt: Int) {
+        requestTargetConnections(context)
+        for entry in context.preset.displays where entry.enabled && entry.mode != nil {
+            let displays = displayController.displays()
+            guard let display = displays.first(where: { $0.identity == entry.identity && $0.active }),
+                  let requestedMode = entry.mode else { continue }
+            if display.currentMode?.describesSameMode(as: requestedMode) == true { continue }
+            if case .failure(let error) = displayController.setMode(requestedMode, displayID: display.id) {
+                context.modeFailures[entry.identity] = error.message
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.verifyModes(context, attempt: attempt)
+        }
+    }
+
+    private func verifyModes(_ context: PresetApplicationContext, attempt: Int) {
+        let displays = displayController.displays()
+        let pending = context.preset.displays.filter { entry in
+            guard entry.enabled, let mode = entry.mode else { return false }
+            guard let display = displays.first(where: { $0.identity == entry.identity && $0.active }) else { return true }
+            return display.currentMode?.describesSameMode(as: mode) != true
+        }
+
+        if pending.isEmpty {
+            applyVisualSettings(context, pass: 1)
+        } else if attempt < 5 {
+            applyModePass(context, attempt: attempt + 1)
+        } else {
+            for entry in pending {
+                let isActive = displays.contains(where: { $0.identity == entry.identity && $0.active })
+                let reason = context.modeFailures[entry.identity]
+                    ?? (isActive
+                        ? "设置后仍未切换到保存的分辨率 \(entry.mode?.label ?? "")"
+                        : "应用过程中显示器失去连接")
+                context.errors.append("\(entry.name)：\(reason)")
+            }
+            applyVisualSettings(context, pass: 1)
+        }
+    }
+
+    private func applyVisualSettings(_ context: PresetApplicationContext, pass: Int) {
+        let displays = displayController.displays()
+        for entry in context.preset.displays where entry.enabled {
+            guard let display = displays.first(where: { $0.identity == entry.identity && $0.active }) else { continue }
             if case .failure(let error) = betterDisplay.setVisualSettings(
                 brightness: entry.brightness,
                 contrast: entry.contrast,
                 displayID: display.id
-            ) {
-                errors.append("\(entry.name)：\(error.message)")
+            ), pass == 2 {
+                context.errors.append("\(entry.name)：\(error.message)")
             }
         }
 
-        displays = displayController.displays()
-        for display in displays where display.active {
-            guard let entry = entries[display.identity], !entry.enabled else { continue }
-            if case .failure(let error) = displayController.setEnabled(false, displayID: display.id) {
-                errors.append("\(entry.name)：\(error.message)")
+        if pass == 1 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                self?.applyVisualSettings(context, pass: 2)
+            }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.disableUnwantedDisplays(context, attempt: 1)
             }
         }
-
-        completePresetApplication(slot: slot, errors: errors)
     }
 
-    private func completePresetApplication(slot: String, errors: [String]) {
+    private func disableUnwantedDisplays(_ context: PresetApplicationContext, attempt: Int) {
+        let currentDisplays = displayController.displays()
+        let hasActiveTarget = context.preset.displays.contains { entry in
+            entry.enabled && currentDisplays.contains(where: { $0.identity == entry.identity && $0.active })
+        }
+        guard hasActiveTarget else {
+            context.errors.append("预设中的目标显示器已失去连接；为避免黑屏，未关闭当前屏幕")
+            completePresetApplication(context)
+            return
+        }
+
+        let unwanted = context.preset.displays.filter { !$0.enabled }
+        for entry in unwanted {
+            let displays = displayController.displays()
+            guard let display = displays.first(where: { $0.identity == entry.identity && $0.active }) else { continue }
+            if case .failure(let error) = displayController.setEnabled(false, displayID: display.id) {
+                context.disableFailures[entry.identity] = error.message
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            guard let self else { return }
+            let displays = self.displayController.displays()
+            let remaining = unwanted.filter { entry in
+                displays.contains(where: { $0.identity == entry.identity && $0.active })
+            }
+            if !remaining.isEmpty && attempt < 3 {
+                self.disableUnwantedDisplays(context, attempt: attempt + 1)
+                return
+            }
+            for entry in remaining {
+                let reason = context.disableFailures[entry.identity] ?? "显示器没有按预设断开"
+                context.errors.append("\(entry.name)：\(reason)")
+            }
+            self.completePresetApplication(context)
+        }
+    }
+
+    private func completePresetApplication(_ context: PresetApplicationContext) {
         applyingPreset = false
-        if errors.isEmpty {
-            UserDefaults.standard.set(slot, forKey: "lastAppliedPreset")
+        if context.errors.isEmpty {
+            UserDefaults.standard.set(context.slot, forKey: "lastAppliedPreset")
         } else {
             UserDefaults.standard.removeObject(forKey: "lastAppliedPreset")
-            showError(errors.joined(separator: "\n"))
+            showError(context.errors.joined(separator: "\n"))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.rebuildMenu() }
+    }
+
+    private func launchAtLoginMenuItem() -> NSMenuItem {
+        let service = SMAppService.mainApp
+        let title: String
+        switch service.status {
+        case .requiresApproval:
+            title = "开机自启动（需在系统设置中允许）"
+        default:
+            title = "开机自启动"
+        }
+        let item = actionItem(title, #selector(toggleLaunchAtLogin))
+        item.state = service.status == .enabled ? .on : (service.status == .requiresApproval ? .mixed : .off)
+        return item
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            switch service.status {
+            case .enabled:
+                try service.unregister()
+            case .requiresApproval:
+                SMAppService.openSystemSettingsLoginItems()
+            case .notRegistered, .notFound:
+                try service.register()
+                if service.status == .requiresApproval {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+            @unknown default:
+                try service.register()
+            }
+            rebuildMenu()
+        } catch {
+            showError("无法修改开机自启动设置：\(error.localizedDescription)")
+        }
     }
 
     @objc private func openPresetSettings() { presetWindow.present() }

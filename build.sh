@@ -13,6 +13,7 @@ xcrun swiftc \
   -module-cache-path "$ROOT/.module-cache" \
   -framework AppKit \
   -framework CoreGraphics \
+  -framework ServiceManagement \
   "$ROOT/DisplayPilot.swift" \
   -o "$APP/Contents/MacOS/DisplayPilot"
 codesign --force --sign - "$APP"
