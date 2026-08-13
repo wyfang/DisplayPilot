@@ -77,6 +77,13 @@ private struct StoredDisplay: Codable {
         identity = display.identity
     }
 
+    init(id: CGDirectDisplayID, name: String, builtin: Bool, identity: String) {
+        self.id = id
+        self.name = name
+        self.builtin = builtin
+        self.identity = identity
+    }
+
     var displayInfo: DisplayInfo {
         DisplayInfo(
             id: id,
@@ -139,7 +146,9 @@ private final class DisplayController {
 
         var stored = loadStoredDisplays()
         for display in online {
-            if let index = stored.firstIndex(where: { $0.identity == display.identity || $0.id == display.id }) {
+            if let index = stored.firstIndex(where: {
+                $0.identity == display.identity || $0.id == display.id
+            }) {
                 stored[index] = StoredDisplay(display)
             } else {
                 stored.append(StoredDisplay(display))
@@ -263,15 +272,35 @@ private final class DisplayController {
             builtin ? "builtin" : "external",
             String(CGDisplayVendorNumber(id)),
             String(CGDisplayModelNumber(id)),
-            String(CGDisplaySerialNumber(id)),
-            String(CGDisplayUnitNumber(id))
+            String(CGDisplaySerialNumber(id))
         ].joined(separator: "-")
     }
 
     private func loadStoredDisplays() -> [StoredDisplay] {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
               let value = try? JSONDecoder().decode([StoredDisplay].self, from: data) else { return [] }
-        return value
+        // Earlier versions included CGDisplayUnitNumber in the identity. macOS can
+        // assign that number differently after a restart or a dock reconnect, which
+        // made one physical display appear as both connected and disconnected.
+        var unique = Set<String>()
+        return value.compactMap { display in
+            let identity = normalizedIdentity(display.identity)
+            guard unique.insert(identity).inserted else { return nil }
+            return StoredDisplay(
+                id: display.id,
+                name: display.name,
+                builtin: display.builtin,
+                identity: identity
+            )
+        }
+    }
+
+    private func normalizedIdentity(_ identity: String) -> String {
+        let components = identity.split(separator: "-", omittingEmptySubsequences: false)
+        // V1: builtin/external-vendor-model-serial-unit; V2 omits the transient unit.
+        guard components.count == 5,
+              components[0] == "builtin" || components[0] == "external" else { return identity }
+        return components.dropLast().joined(separator: "-")
     }
 
     private func saveStoredDisplays(_ displays: [StoredDisplay]) {
@@ -305,6 +334,7 @@ private final class PresetStore {
             presetB: DisplayPreset(name: "预设 B", displays: [])
         )
         let original = collection
+        migrateLegacyIdentities(&collection)
         synchronize(&collection.presetA, with: displays, defaultBrightness: legacyBrightness("presetA", fallback: 0.35))
         synchronize(&collection.presetB, with: displays, defaultBrightness: legacyBrightness("presetB", fallback: 0.80))
         if collection != original || decoded == nil {
@@ -337,6 +367,34 @@ private final class PresetStore {
             }
         }
         preset.displays.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func migrateLegacyIdentities(_ collection: inout PresetCollection) {
+        migrateLegacyIdentities(&collection.presetA)
+        migrateLegacyIdentities(&collection.presetB)
+    }
+
+    private func migrateLegacyIdentities(_ preset: inout DisplayPreset) {
+        var merged: [DisplayPresetEntry] = []
+        for var entry in preset.displays {
+            entry.identity = normalizedIdentity(entry.identity)
+            if let index = merged.firstIndex(where: { $0.identity == entry.identity }) {
+                // A duplicate could have been created while macOS reported a new
+                // unit number. Preserve the existing settings and avoid disabling a
+                // display that either duplicate was configured to keep enabled.
+                merged[index].enabled = merged[index].enabled || entry.enabled
+            } else {
+                merged.append(entry)
+            }
+        }
+        preset.displays = merged
+    }
+
+    private func normalizedIdentity(_ identity: String) -> String {
+        let components = identity.split(separator: "-", omittingEmptySubsequences: false)
+        guard components.count == 5,
+              components[0] == "builtin" || components[0] == "external" else { return identity }
+        return components.dropLast().joined(separator: "-")
     }
 
     private func legacyBrightness(_ key: String, fallback: Double) -> Double {

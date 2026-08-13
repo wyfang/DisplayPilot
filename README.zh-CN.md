@@ -67,7 +67,7 @@ DISPLAYPILOT_OUTPUT_DIR=/自定义/输出目录 ./build.sh
 
 ### 显示器发现与身份识别
 
-Display Pilot 通过 `CGGetOnlineDisplayList` 枚举显示器。它使用内置/外接标记，以及厂商、型号、序列号和单元编号组合出相对稳定的硬件身份。已知显示器和两套预设会编码为 JSON，保存在 `UserDefaults` 中。
+Display Pilot 通过 `CGGetOnlineDisplayList` 枚举显示器。它使用内置/外接标记，以及厂商、型号和序列号组合出稳定的硬件身份；不会使用 macOS 在重启或重新接入扩展坞后可能变化的单元编号。已知显示器和两套预设会编码为 JSON，保存在 `UserDefaults` 中。旧版本中由单元编号造成的重复记录会在下次读取时自动合并。
 
 ### 显示器开关
 

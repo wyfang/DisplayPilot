@@ -67,7 +67,7 @@ Use **Launch at Login** in the menu to register or remove the macOS login item. 
 
 ### Display discovery and identity
 
-Display Pilot enumerates displays with `CGGetOnlineDisplayList`. It derives a persistent hardware identity from the built-in/external flag plus the vendor, model, serial, and unit numbers. Known displays and both presets are encoded as JSON in `UserDefaults`.
+Display Pilot enumerates displays with `CGGetOnlineDisplayList`. It derives a persistent hardware identity from the built-in/external flag plus vendor, model, and serial numbers, deliberately excluding the unit number macOS may change after a restart or dock reconnect. Known displays and both presets are encoded as JSON in `UserDefaults`; duplicate records produced by earlier versions are merged automatically when read.
 
 ### Connection switching
 
