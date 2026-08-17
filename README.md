@@ -4,16 +4,22 @@
 
 [![Build](https://github.com/wyfang/DisplayPilot/actions/workflows/build.yml/badge.svg)](https://github.com/wyfang/DisplayPilot/actions/workflows/build.yml)
 
-Display Pilot is a lightweight macOS menu bar app for switching an entire multi-display setup with one click. Each of its two presets stores the enabled displays, brightness, contrast adjustment, and resolution for every known display.
+Display Pilot is a lightweight macOS menu bar app for switching an entire multi-display setup with one click. It is designed for fast transitions while using the Mac or controlling it remotely: keep only one display active, restore a full desk setup, or switch to a presentation layout.
+
+The project grew out of BetterDisplay: its display-switching features are part of BetterDisplay Pro, while it also exposes integration interfaces other apps can call. Display Pilot turns those capabilities into two always-available menu bar presets. Each preset stores enabled displays, brightness, contrast adjustment, and resolution for every known display, avoiding repeated trips through display settings.
+
+## Download
+
+Download the latest macOS archive from [GitHub Releases](https://github.com/wyfang/DisplayPilot/releases/latest). Unzip it and move **Display Pilot.app** to Applications. The app is not Apple-notarized, so macOS may require you to right-click it and choose **Open** the first time.
 
 ## Features
 
 - Two complete per-display presets with user-editable names.
 - Independent brightness, contrast adjustment, resolution, and connection state for each display.
-- One-click switching from the menu bar, with `⌘1` and `⌘2` shortcuts.
+- One-click switching from the menu bar, with `⌘1` and `⌘2` shortcuts—useful for quickly restoring the right display setup over remote control.
 - An optional launch-at-login setting in the menu.
 - Remembers disconnected displays so a preset can reconnect them later.
-- Applies changes in a safe order: connect and wait for displays to stabilize, verify and retry resolutions, resend image settings, then disconnect unused displays.
+- Applies changes in a safe order: connect and wait for display IDs, current modes, and mode lists to stabilize; switch all resolutions in one transaction; verify with progressive retries; then disconnect unused displays.
 - Refuses to disconnect the last active display.
 - Migrates the brightness values used by the earlier brightness-only version.
 
@@ -21,7 +27,7 @@ Display Pilot is a lightweight macOS menu bar app for switching an entire multi-
 
 - macOS 13 or later.
 - Xcode Command Line Tools for building from source.
-- [BetterDisplay](https://github.com/waydabber/BetterDisplay) running with integration enabled for brightness and contrast control. Display connection and resolution switching do not depend on BetterDisplay.
+- [BetterDisplay](https://github.com/waydabber/BetterDisplay) running with integration enabled for brightness and contrast control. Display Pilot uses native macOS display configuration for display connection and resolution switching; BetterDisplay's integration interface applies brightness and contrast.
 
 In BetterDisplay, integration can be checked under **Settings → Application → Integration**. Notification-based integration is enabled by default in current BetterDisplay versions.
 
@@ -75,20 +81,20 @@ Display connection state is changed inside a Core Graphics display configuration
 
 ### Resolution switching
 
-Available modes come from `CGDisplayCopyAllDisplayModes`. A preset stores the logical size, backing pixel size, refresh rate, and mode identifier. When applied, Display Pilot finds the closest matching current mode and commits it with `CGConfigureDisplayWithDisplayMode`.
+Available modes come from `CGDisplayCopyAllDisplayModes`. A preset stores the logical size, backing pixel size, refresh rate, and mode identifier. When applied, Display Pilot finds the closest matching current mode. It adds every pending display through `CGConfigureDisplayWithDisplayMode` to one Core Graphics configuration transaction and commits them together, preventing a per-display commit from re-enumerating the topology underneath the next request.
 
 ### Brightness and contrast
 
-For each active target display, Display Pilot sends a JSON request through `DistributedNotificationCenter` to `pro.betterdisplay.BetterDisplay.request`. The request uses the macOS display ID and BetterDisplay's `brightness` and software `contrast` parameters. This follows BetterDisplay's [integration interface](https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI).
+For each active target display, Display Pilot sends a JSON request through `DistributedNotificationCenter` to `pro.betterdisplay.BetterDisplay.request`. The request uses the macOS display ID and BetterDisplay's `brightness` and software `contrast` parameters. This follows BetterDisplay's [integration interface](https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI). Like BetterDisplay's CLI, this interface makes display actions available to an automation workflow.
 
 ### Preset application order
 
 ```text
 Connect target displays
         ↓
-Wait for macOS enumeration to stabilize
+Wait for display IDs, current modes, and mode lists to remain stable
         ↓
-Apply and verify resolution (retry if needed)
+Apply all resolutions in one transaction and verify (progressively retry if needed)
         ↓
 Apply brightness and contrast twice
         ↓

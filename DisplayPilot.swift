@@ -190,46 +190,86 @@ private final class DisplayController {
         return .success(())
     }
 
-    func setMode(_ requested: DisplayModeInfo, displayID: CGDirectDisplayID) -> Result<Void, AppFailure> {
-        guard CGDisplayIsActive(displayID) != 0 else {
-            return .failure(AppFailure(message: "显示器尚未连接，无法设置分辨率。"))
+    func setModes(
+        _ requests: [(mode: DisplayModeInfo, displayID: CGDirectDisplayID)]
+    ) -> [CGDirectDisplayID: AppFailure] {
+        var failures: [CGDirectDisplayID: AppFailure] = [:]
+        var selectedModes: [(displayID: CGDirectDisplayID, requested: DisplayModeInfo, mode: CGDisplayMode)] = []
+
+        for request in requests {
+            guard CGDisplayIsActive(request.displayID) != 0 else {
+                failures[request.displayID] = AppFailure(message: "显示器尚未连接，无法设置分辨率。")
+                continue
+            }
+
+            let modes = rawDisplayModes(request.displayID).filter { $0.isUsableForDesktopGUI() }
+            let logicalMatches = modes.filter {
+                let candidate = DisplayModeInfo($0)
+                return candidate.width == request.mode.width && candidate.height == request.mode.height
+            }
+            guard let mode = logicalMatches.first(where: {
+                DisplayModeInfo($0).describesSameMode(as: request.mode)
+            }) ?? logicalMatches.min(by: {
+                modeDistance(DisplayModeInfo($0), from: request.mode)
+                    < modeDistance(DisplayModeInfo($1), from: request.mode)
+            }) else {
+                failures[request.displayID] = AppFailure(
+                    message: "找不到已保存的分辨率 \(request.mode.label)。"
+                )
+                continue
+            }
+
+            if let current = CGDisplayCopyDisplayMode(request.displayID),
+               DisplayModeInfo(current).describesSameMode(as: DisplayModeInfo(mode)) {
+                continue
+            }
+            selectedModes.append((request.displayID, request.mode, mode))
         }
 
-        let modes = rawDisplayModes(displayID).filter { $0.isUsableForDesktopGUI() }
-        let logicalMatches = modes.filter {
-            let candidate = DisplayModeInfo($0)
-            return candidate.width == requested.width && candidate.height == requested.height
-        }
-        guard let mode = logicalMatches.first(where: { DisplayModeInfo($0).describesSameMode(as: requested) })
-                ?? logicalMatches.min(by: {
-                    modeDistance(DisplayModeInfo($0), from: requested)
-                        < modeDistance(DisplayModeInfo($1), from: requested)
-                }) else {
-            return .failure(AppFailure(message: "找不到已保存的分辨率 \(requested.label)。"))
-        }
-
-        if let current = CGDisplayCopyDisplayMode(displayID),
-           DisplayModeInfo(current).describesSameMode(as: DisplayModeInfo(mode)) {
-            return .success(())
-        }
+        guard !selectedModes.isEmpty else { return failures }
 
         var config: CGDisplayConfigRef?
         let begin = CGBeginDisplayConfiguration(&config)
         guard begin == .success, let config else {
-            return .failure(AppFailure(message: "无法开始修改分辨率（错误 \(begin.rawValue)）。"))
+            for selection in selectedModes {
+                failures[selection.displayID] = AppFailure(
+                    message: "无法开始修改分辨率（错误 \(begin.rawValue)）。"
+                )
+            }
+            return failures
         }
 
-        let change = CGConfigureDisplayWithDisplayMode(config, displayID, mode, nil)
-        guard change == .success else {
+        var configured: [(displayID: CGDirectDisplayID, requested: DisplayModeInfo)] = []
+        for selection in selectedModes {
+            let change = CGConfigureDisplayWithDisplayMode(
+                config,
+                selection.displayID,
+                selection.mode,
+                nil
+            )
+            if change == .success {
+                configured.append((selection.displayID, selection.requested))
+            } else {
+                failures[selection.displayID] = AppFailure(
+                    message: "macOS 拒绝了分辨率 \(selection.requested.label)（错误 \(change.rawValue)）。"
+                )
+            }
+        }
+
+        guard !configured.isEmpty else {
             CGCancelDisplayConfiguration(config)
-            return .failure(AppFailure(message: "macOS 拒绝了分辨率 \(requested.label)（错误 \(change.rawValue)）。"))
+            return failures
         }
 
         let complete = CGCompleteDisplayConfiguration(config, .permanently)
-        guard complete == .success else {
-            return .failure(AppFailure(message: "分辨率配置未能保存（错误 \(complete.rawValue)）。"))
+        if complete != .success {
+            for selection in configured {
+                failures[selection.displayID] = AppFailure(
+                    message: "分辨率配置未能保存（错误 \(complete.rawValue)）。"
+                )
+            }
         }
-        return .success(())
+        return failures
     }
 
     private func modeDistance(_ candidate: DisplayModeInfo, from requested: DisplayModeInfo) -> Double {
@@ -952,20 +992,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let allReady = resolved.count == targets.count && resolved.allSatisfy { !$0.availableModes.isEmpty }
         let signature = resolved
             .sorted { $0.identity < $1.identity }
-            .map { "\($0.identity):\($0.id):\($0.currentMode?.modeID ?? -1)" }
+            .map { display in
+                let modes = display.availableModes
+                    .map { mode in
+                        let refresh = Int((mode.refreshRate * 100).rounded())
+                        return "\(mode.modeID):\(mode.width)x\(mode.height):\(mode.pixelWidth)x\(mode.pixelHeight):\(refresh)"
+                    }
+                    .sorted()
+                    .joined(separator: ",")
+                return "\(display.identity):\(display.id):\(display.currentMode?.modeID ?? -1):\(modes)"
+            }
             .joined(separator: "|")
         let nextStableCount = allReady && signature == stableSignature ? stableCount + 1 : (allReady ? 1 : 0)
 
-        if allReady && nextStableCount >= 2 {
+        // A display can be active before link training and mode enumeration have
+        // actually settled. Requiring three identical snapshots avoids submitting
+        // a mode change during that short post-connect reconfiguration window.
+        if allReady && nextStableCount >= 3 {
             applyModePass(context, attempt: 1)
             return
         }
 
-        if attempt < 12 {
+        if attempt < 16 {
             if attempt > 0 && attempt.isMultiple(of: 2) {
                 requestTargetConnections(context)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
                 self?.waitForTargetDisplays(
                     context,
                     attempt: attempt + 1,
@@ -990,17 +1042,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyModePass(_ context: PresetApplicationContext, attempt: Int) {
         requestTargetConnections(context)
+        let displays = displayController.displays()
+        var entriesByDisplayID: [CGDirectDisplayID: DisplayPresetEntry] = [:]
+        var requests: [(mode: DisplayModeInfo, displayID: CGDirectDisplayID)] = []
+
         for entry in context.preset.displays where entry.enabled && entry.mode != nil {
-            let displays = displayController.displays()
             guard let display = displays.first(where: { $0.identity == entry.identity && $0.active }),
                   let requestedMode = entry.mode else { continue }
             if display.currentMode?.describesSameMode(as: requestedMode) == true { continue }
-            if case .failure(let error) = displayController.setMode(requestedMode, displayID: display.id) {
+            entriesByDisplayID[display.id] = entry
+            requests.append((requestedMode, display.id))
+        }
+
+        // Changing one display can cause Quartz to re-evaluate the entire display
+        // topology. Submit every pending mode in one transaction so one display's
+        // commit cannot invalidate the next display's request.
+        let failures = displayController.setModes(requests)
+        for (displayID, error) in failures {
+            if let entry = entriesByDisplayID[displayID] {
                 context.modeFailures[entry.identity] = error.message
             }
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+        let verificationDelay = min(0.8 + Double(attempt - 1) * 0.45, 2.6)
+        DispatchQueue.main.asyncAfter(deadline: .now() + verificationDelay) { [weak self] in
             self?.verifyModes(context, attempt: attempt)
         }
     }
@@ -1015,7 +1080,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if pending.isEmpty {
             applyVisualSettings(context, pass: 1)
-        } else if attempt < 5 {
+        } else if attempt < 6 {
             applyModePass(context, attempt: attempt + 1)
         } else {
             for entry in pending {

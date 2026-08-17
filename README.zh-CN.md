@@ -4,16 +4,22 @@
 
 [![构建状态](https://github.com/wyfang/DisplayPilot/actions/workflows/build.yml/badge.svg)](https://github.com/wyfang/DisplayPilot/actions/workflows/build.yml)
 
-Display Pilot 是一款轻量级 macOS 菜单栏应用，用一次点击切换整套多显示器配置。它提供预设 A 和预设 B，每套预设都能分别保存每块显示器的开关状态、亮度、对比度调整和分辨率。
+Display Pilot 是一款轻量级 macOS 菜单栏应用，用一次点击切换整套多显示器配置。它特别适合远程控制电脑，或在本机工作时快速在不同用屏状态之间切换：例如只保留一台显示器、恢复完整工作台，或切换到演示用配置。
+
+它的初衷来自 BetterDisplay：BetterDisplay 的显示器开关能力属于专业版，但它也提供了可供其他应用调用的集成接口。Display Pilot 将这些能力整理为常驻菜单栏的两套预设；每套预设可保存每块显示器的开关状态、亮度、对比度调整和分辨率，省去反复打开设置界面的操作。
+
+## 下载
+
+从 [GitHub Releases](https://github.com/wyfang/DisplayPilot/releases/latest) 下载最新的 macOS 压缩包。解压后将 **Display Pilot.app** 移入“应用程序”文件夹；由于应用未经过 Apple 公证，首次启动时可能需要右键点击并选择“打开”。
 
 ## 功能
 
 - 两套完整的逐显示器配置，名称可由用户修改。
 - 每块屏幕可独立保存亮度、对比度调整、分辨率和开关状态。
-- 从菜单栏一键切换，并提供 `⌘1`、`⌘2` 快捷键。
+- 从菜单栏一键切换，并提供 `⌘1`、`⌘2` 快捷键；适合远程控制时快速恢复所需的显示器组合。
 - 可从菜单栏开启或关闭“开机自启动”。
 - 记住已关闭或暂时离线的显示器，之后仍可通过预设重新连接。
-- 按安全顺序执行：先连接并等待屏幕稳定，再校验和重试分辨率、重复发送画面参数，最后关闭不需要的屏幕。
+- 按安全顺序执行：先连接并等待显示器 ID、当前模式和可用模式列表稳定，再以单次事务切换全部分辨率，校验并渐进重试，最后关闭不需要的屏幕。
 - 始终禁止关闭最后一块活动屏幕，降低黑屏风险。
 - 从旧版升级时，自动迁移原有的亮度 A / B 数值。
 
@@ -21,7 +27,7 @@ Display Pilot 是一款轻量级 macOS 菜单栏应用，用一次点击切换�
 
 - macOS 13 或更高版本。
 - 从源码构建需要安装 Xcode Command Line Tools。
-- 调整亮度和对比度需要运行 [BetterDisplay](https://github.com/waydabber/BetterDisplay)，并启用它的集成功能。显示器开关和分辨率切换不依赖 BetterDisplay。
+- 调整亮度和对比度需要运行 [BetterDisplay](https://github.com/waydabber/BetterDisplay)，并启用它的集成功能。Display Pilot 通过 macOS 原生显示器配置完成显示器开关和分辨率切换；BetterDisplay 的集成接口用于应用亮度和对比度。
 
 可在 BetterDisplay 的 **设置 → 应用 → 集成** 中检查集成功能。当前版本的 BetterDisplay 默认启用通知集成。
 
@@ -75,20 +81,20 @@ Display Pilot 通过 `CGGetOnlineDisplayList` 枚举显示器。它使用内置/
 
 ### 分辨率切换
 
-应用通过 `CGDisplayCopyAllDisplayModes` 获取可用模式。预设会保存逻辑尺寸、实际像素尺寸、刷新率和模式编号。应用预设时，它会从当前可用模式中寻找最接近的匹配，再通过 `CGConfigureDisplayWithDisplayMode` 提交。
+应用通过 `CGDisplayCopyAllDisplayModes` 获取可用模式。预设会保存逻辑尺寸、实际像素尺寸、刷新率和模式编号。应用预设时，它会从当前可用模式中寻找最接近的匹配。所有待切换显示器会通过多个 `CGConfigureDisplayWithDisplayMode` 调用加入同一个 Core Graphics 配置事务，再统一提交，避免逐台提交引发的显示拓扑重枚举打断下一台显示器。
 
 ### 亮度与对比度
 
-对于预设中处于开启状态的每块显示器，Display Pilot 会通过 `DistributedNotificationCenter` 向 `pro.betterdisplay.BetterDisplay.request` 发送 JSON 请求。请求包含 macOS 显示器 ID，以及 BetterDisplay 的 `brightness` 和软件 `contrast` 参数。调用格式遵循 BetterDisplay 的[集成接口说明](https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI)。
+对于预设中处于开启状态的每块显示器，Display Pilot 会通过 `DistributedNotificationCenter` 向 `pro.betterdisplay.BetterDisplay.request` 发送 JSON 请求。请求包含 macOS 显示器 ID，以及 BetterDisplay 的 `brightness` 和软件 `contrast` 参数。调用格式遵循 BetterDisplay 的[集成接口说明](https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI)；该接口与其 CLI 一样，允许将显示器操作接入自动化工作流。
 
 ### 应用预设的顺序
 
 ```text
 连接预设需要的显示器
         ↓
-等待 macOS 完成显示器枚举并稳定
+等待显示器 ID、当前模式和可用模式列表连续稳定
         ↓
-应用并校验分辨率（必要时重试）
+在单次事务中应用全部分辨率并校验（必要时渐进重试）
         ↓
 应用亮度和对比度（重复发送一次）
         ↓
