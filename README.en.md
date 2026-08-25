@@ -40,6 +40,6 @@ Display Pilot connects the required displays, waits for their modes to stabilize
 - Physically disconnected displays cannot be reconnected by software
 - Cables, docks, mirroring, HDR, and macOS updates may invalidate saved modes
 
-## License
+## Copyright
 
-Original code and code documentation are licensed under the [Apache License 2.0](./LICENSE). Personal material, branding, screenshots, and third-party components are excluded. See [NOTICE](./NOTICE) and [LICENSE_SCOPE.md](./LICENSE_SCOPE.md).
+Original code is licensed under the [Apache License 2.0](./LICENSE). Personal branding and assets are excluded.

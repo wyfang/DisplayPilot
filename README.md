@@ -40,6 +40,6 @@ Display Pilot 先连接预设需要的屏幕，等待显示模式稳定，再以
 - 软件无法重新连接物理断开的显示器
 - 线材、扩展坞、镜像、HDR 或系统变化可能使已保存模式失效
 
-## 许可
+## 版权说明
 
-原创代码与代码文档依据 [Apache License 2.0](./LICENSE) 发布；个人素材、品牌、游戏内容与第三方内容不在许可范围内。详见 [NOTICE](./NOTICE) 与 [LICENSE_SCOPE.md](./LICENSE_SCOPE.md)。
+原创代码依据 [Apache License 2.0](./LICENSE) 发布。个人品牌和素材不在许可范围内。
